@@ -130,9 +130,8 @@ def calculate_signals(df):
     confluence = max(bull, bear)
     direction = "HAUSSIER" if bull > bear else "BAISSIER" if bear > bull else "NEUTRE"
     stars = confluence_stars(confluence)
-    last_time = df.index[-1].strftime("%Y-%m-%d %H:%M")
 
-    return {"bull": bull, "bear": bear, "confluence": confluence, "direction": direction, "stars": stars, "last_time": last_time, "signals": signals}
+    return {"bull": bull, "bear": bear, "confluence": confluence, "direction": direction, "stars": stars, "signals": signals}
 
 # --- UI ---
 st.sidebar.header("Paramètres")
@@ -147,21 +146,19 @@ if st.sidebar.button("Lancer le scan"):
         res = calculate_signals(df)
         if res:
             if show_all or res['confluence'] >= min_conf:
+                color = 'green' if res['direction'] == 'HAUSSIER' else 'red' if res['direction'] == 'BAISSIER' else 'gray'
                 results.append({
                     "Paire": symbol.replace("/", ""),
-                    "Étoiles": res['stars'],
-                    "Confluence": res['confluence'],
-                    "Direction": res['direction'],
-                    "Dernier": res['last_time'],
-                    **res['signals']
+                    "Confluences": res['stars'],
+                    "Direction": f":{color}[{res['direction']}]"," +
+                    "**res['signals']
                 })
 
     if results:
-        df_res = pd.DataFrame(results).sort_values(by="Confluence", ascending=False)
+        df_res = pd.DataFrame(results).sort_values(by="Confluences", ascending=False)
         st.dataframe(df_res, use_container_width=True)
         st.download_button("📂 Exporter CSV", data=df_res.to_csv(index=False).encode('utf-8'), file_name="confluences.csv", mime="text/csv")
     else:
         st.warning("Aucun résultat correspondant aux critères.")
 
 st.caption(f"Dernière mise à jour : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
-
