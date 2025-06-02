@@ -88,6 +88,16 @@ def get_data(symbol):
     except Exception:
         return None
 
+# --- STARS ---
+def confluence_stars(val):
+    if val == 6: return "⭐⭐⭐⭐⭐⭐"
+    elif val == 5: return "⭐⭐⭐⭐⭐"
+    elif val == 4: return "⭐⭐⭐⭐"
+    elif val == 3: return "⭐⭐⭐"
+    elif val == 2: return "⭐⭐"
+    elif val == 1: return "⭐"
+    else: return "WAIT"
+
 # --- SIGNALS ---
 def calculate_signals(df):
     if df is None or len(df) < 60:
@@ -119,8 +129,9 @@ def calculate_signals(df):
 
     confluence = max(bull, bear)
     direction = "HAUSSIER" if bull > bear else "BAISSIER" if bear > bull else "NEUTRE"
+    stars = confluence_stars(confluence)
 
-    return {"bull": bull, "bear": bear, "confluence": confluence, "direction": direction, "signals": signals}
+    return {"bull": bull, "bear": bear, "confluence": confluence, "direction": direction, "stars": stars, "signals": signals}
 
 # --- UI ---
 st.sidebar.header("Paramètres")
@@ -135,7 +146,7 @@ if st.sidebar.button("Lancer le scan"):
         res = calculate_signals(df)
         if res:
             if show_all or res['confluence'] >= min_conf:
-                results.append({"Paire": symbol.replace("/", ""), "Confluence": res['confluence'], "Direction": res['direction'], **res['signals']})
+                results.append({"Paire": symbol.replace("/", ""), "Étoiles": res['stars'], "Confluence": res['confluence'], "Direction": res['direction'], **res['signals']})
 
     if results:
         df_res = pd.DataFrame(results).sort_values(by="Confluence", ascending=False)
@@ -144,3 +155,4 @@ if st.sidebar.button("Lancer le scan"):
         st.warning("Aucun résultat correspondant aux critères.")
 
 st.caption(f"Dernière mise à jour : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
+
