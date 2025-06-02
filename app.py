@@ -146,9 +146,9 @@ def calculate_signals(df):
     elif shac.iloc[-1] < shao.iloc[-1]: bear += 1; signals['SHA'] = "▼"
 
     ichi_sig = ichimoku_signal(df['High'], df['Low'], df['Close'])
-    if ichi_sig == 1: bull += 1; signals['Ichi'] = "▲"
-    elif ichi_sig == -1: bear += 1; signals['Ichi'] = "▼"
-    else: signals['Ichi'] = "—"
+    if ichi_sig == 1: bull += 1; signals['Ichimoku'] = "▲"
+    elif ichi_sig == -1: bear += 1; signals['Ichimoku'] = "▼"
+    else: signals['Ichimoku'] = "—"
 
     confluence = max(bull, bear)
     direction = "HAUSSIER" if bull > bear else "BAISSIER" if bear > bull else "NEUTRE"
