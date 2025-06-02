@@ -64,6 +64,24 @@ def smoothed_heiken_ashi(df, l1=10, l2=10):
     hao, hac = heiken_ashi(pd.DataFrame({'Open': eo, 'High': eh, 'Low': el, 'Close': ec}))
     return ema(hao, l2), ema(hac, l2)
 
+def ichimoku_signal(h, l, c, tenkan=9, kijun=26, senkou_b=52):
+    if len(h) < senkou_b or len(l) < senkou_b or len(c) < senkou_b:
+        return 0
+    tenkan_sen = (h.rolling(tenkan).max() + l.rolling(tenkan).min()) / 2
+    kijun_sen = (h.rolling(kijun).max() + l.rolling(kijun).min()) / 2
+    senkou_a = (tenkan_sen + kijun_sen) / 2
+    senkou_b_val = (h.rolling(senkou_b).max() + l.rolling(senkou_b).min()) / 2
+    ccl = c.iloc[-1]
+    cssa = senkou_a.iloc[-1]
+    cssb = senkou_b_val.iloc[-1]
+    ctn = max(cssa, cssb)
+    cbn = min(cssa, cssb)
+    if ccl > ctn:
+        return 1
+    elif ccl < cbn:
+        return -1
+    return 0
+
 # --- FETCH DATA ---
 @st.cache_data(ttl=900)
 def get_data(symbol):
@@ -127,6 +145,11 @@ def calculate_signals(df):
     if shac.iloc[-1] > shao.iloc[-1]: bull += 1; signals['SHA'] = "▲"
     elif shac.iloc[-1] < shao.iloc[-1]: bear += 1; signals['SHA'] = "▼"
 
+    ichi_sig = ichimoku_signal(df['High'], df['Low'], df['Close'])
+    if ichi_sig == 1: bull += 1; signals['Ichi'] = "▲"
+    elif ichi_sig == -1: bear += 1; signals['Ichi'] = "▼"
+    else: signals['Ichi'] = "—"
+
     confluence = max(bull, bear)
     direction = "HAUSSIER" if bull > bear else "BAISSIER" if bear > bull else "NEUTRE"
     stars = confluence_stars(confluence)
@@ -165,5 +188,3 @@ if st.sidebar.button("Lancer le scan"):
         st.warning("Aucun résultat correspondant aux critères.")
 
 st.caption(f"Dernière mise à jour : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
-
-  
