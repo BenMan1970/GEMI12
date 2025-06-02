@@ -131,7 +131,7 @@ def calculate_signals(df):
     direction = "HAUSSIER" if bull > bear else "BAISSIER" if bear > bull else "NEUTRE"
     stars = confluence_stars(confluence)
 
-    return {"bull": bull, "bear": bear, "confluence": confluence, "direction": direction, "stars": stars, "signals": signals}
+    return {"confluence": confluence, "direction": direction, "stars": stars, "signals": signals}
 
 # --- UI ---
 st.sidebar.header("Paramètres")
@@ -147,18 +147,23 @@ if st.sidebar.button("Lancer le scan"):
         if res:
             if show_all or res['confluence'] >= min_conf:
                 color = 'green' if res['direction'] == 'HAUSSIER' else 'red' if res['direction'] == 'BAISSIER' else 'gray'
-                results.append({
+                row = {
                     "Paire": symbol.replace("/", ""),
                     "Confluences": res['stars'],
-                    "Direction": f":{color}[{res['direction']}]"," +
-                    "**res['signals']
-                })
+                    "Direction": f"<span style='color:{color}'>{res['direction']}</span>",
+                }
+                row.update(res['signals'])
+                results.append(row)
 
     if results:
         df_res = pd.DataFrame(results).sort_values(by="Confluences", ascending=False)
-        st.dataframe(df_res, use_container_width=True)
+        st.markdown(
+            df_res.to_html(escape=False, index=False), unsafe_allow_html=True
+        )
         st.download_button("📂 Exporter CSV", data=df_res.to_csv(index=False).encode('utf-8'), file_name="confluences.csv", mime="text/csv")
     else:
         st.warning("Aucun résultat correspondant aux critères.")
 
 st.caption(f"Dernière mise à jour : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
+
+  
