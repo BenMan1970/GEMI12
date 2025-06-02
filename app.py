@@ -10,7 +10,7 @@ import requests
 # --- CONFIG STREAMLIT ---
 st.set_page_config(page_title="Scanner Confluence Forex (Twelve Data)", page_icon="⭐", layout="wide")
 st.title("🔍 Scanner Confluence Forex Premium (Twelve Data)")
-st.markdown("*Utilisation de l'API Twelve Data pour les données de marché H4*")
+st.markdown("*Utilisation de l'API Twelve Data pour les données de marché H1*")
 
 # --- API CONFIG ---
 TWELVE_DATA_API_URL = "https://api.twelvedata.com/time_series"
@@ -20,7 +20,7 @@ if not API_KEY:
     st.stop()
 
 FOREX_PAIRS_TD = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/JPY", "GBP/JPY", "EUR/GBP"]
-INTERVAL = "4h"
+INTERVAL = "1h"
 OUTPUT_SIZE = 250
 
 # --- INDICATEURS ---
@@ -130,8 +130,9 @@ def calculate_signals(df):
     confluence = max(bull, bear)
     direction = "HAUSSIER" if bull > bear else "BAISSIER" if bear > bull else "NEUTRE"
     stars = confluence_stars(confluence)
+    last_time = df.index[-1].strftime("%Y-%m-%d %H:%M")
 
-    return {"bull": bull, "bear": bear, "confluence": confluence, "direction": direction, "stars": stars, "signals": signals}
+    return {"bull": bull, "bear": bear, "confluence": confluence, "direction": direction, "stars": stars, "last_time": last_time, "signals": signals}
 
 # --- UI ---
 st.sidebar.header("Paramètres")
@@ -142,15 +143,23 @@ if st.sidebar.button("Lancer le scan"):
     for i, symbol in enumerate(FOREX_PAIRS_TD):
         st.sidebar.write(f"{symbol} ({i+1}/{len(FOREX_PAIRS_TD)})")
         df = get_data(symbol)
-        time.sleep(1.0)  # Limitation API gratuite
+        time.sleep(1.0)
         res = calculate_signals(df)
         if res:
             if show_all or res['confluence'] >= min_conf:
-                results.append({"Paire": symbol.replace("/", ""), "Étoiles": res['stars'], "Confluence": res['confluence'], "Direction": res['direction'], **res['signals']})
+                results.append({
+                    "Paire": symbol.replace("/", ""),
+                    "Étoiles": res['stars'],
+                    "Confluence": res['confluence'],
+                    "Direction": res['direction'],
+                    "Dernier": res['last_time'],
+                    **res['signals']
+                })
 
     if results:
         df_res = pd.DataFrame(results).sort_values(by="Confluence", ascending=False)
         st.dataframe(df_res, use_container_width=True)
+        st.download_button("📂 Exporter CSV", data=df_res.to_csv(index=False).encode('utf-8'), file_name="confluences.csv", mime="text/csv")
     else:
         st.warning("Aucun résultat correspondant aux critères.")
 
