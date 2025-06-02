@@ -1,31 +1,26 @@
-# app.py
-import streamlit as st
-import pandas as pd
-import numpy as np
-from datetime import datetime, timezone
-import time
-import traceback
-import requests
-
-# --- CONFIG STREAMLIT ---
-st.set_page_config(page_title="Scanner Confluence Forex (Twelve Data)", page_icon="⭐", layout="wide")
-st.title("🔍 Scanner Confluence Forex Premium (Twelve Data)")
-st.markdown("*Utilisation de l'API Twelve Data pour les données de marché H1*")
-
-# --- API CONFIG ---
-TWELVE_DATA_API_URL = "https://api.twelvedata.com/time_series"
-API_KEY = st.secrets.get("TWELVE_DATA_API_KEY")
-if not API_KEY:
-    st.error("Clé API manquante. Ajoutez-la dans .streamlit/secrets.toml : TWELVE_DATA_API_KEY = '...' ")
-    st.stop()
-
-FOREX_PAIRS_TD = [
-    "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD",
-    "EUR/JPY", "GBP/JPY", "EUR/GBP",
-    "XAU/USD", "US30/USD", "NAS100/USD", "SPX/USD"
-]
-INTERVAL = "1h"
-OUTPUT_SIZE = 250
+# --- FETCH DATA ---
+@st.cache_data(ttl=900)
+def get_data(symbol):
+    try:
+        r = requests.get(TWELVE_DATA_API_URL, params={
+            "symbol": symbol,
+            "interval": INTERVAL,
+            "outputsize": OUTPUT_SIZE,
+            "apikey": API_KEY,
+            "timezone": "UTC"
+        })
+        j = r.json()
+        if "values" not in j:
+            return None
+        df = pd.DataFrame(j["values"])
+        df['datetime'] = pd.to_datetime(df['datetime'])
+        df.set_index('datetime', inplace=True)
+        df = df.sort_index()
+        df = df.astype(float)
+        df.rename(columns={"open":"Open","high":"High","low":"Low","close":"Close"}, inplace=True)
+        return df[['Open','High','Low','Close']]
+    except Exception:
+        return None
 
 # --- INDICATEURS ---
 def ema(s, p): return s.ewm(span=p, adjust=False).mean()
