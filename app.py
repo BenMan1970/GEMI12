@@ -1,87 +1,149 @@
+
 import streamlit as st
 import pandas as pd
-import pandas_ta as ta
 import numpy as np
+import time
+from datetime import datetime, timezone
 import requests
 
-# CONFIG
-st.set_page_config(layout="wide")
-st.title("Scanner Forex Majeures ⭐ (Confluence 5-6 étoiles)")
-
-# Paramètres
-API_KEY = st.secrets.get("TWELVE_DATA_API_KEY", "")
-MAJOR_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "NZD/USD"]
-INTERVAL = "1h"
-
-# Fonctions
-def get_data_twelvedata(symbol: str, interval: str, apikey: str):
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=100&apikey={apikey}"
-    r = requests.get(url)
-    d = r.json()
-    if d.get("status") == "ok":
-        df = pd.DataFrame(d["values"])
-        df["datetime"] = pd.to_datetime(df["datetime"])
-        df = df.set_index("datetime")
-        df = df.astype(float).sort_index()
-        return df
-    else:
+# --- FETCH DATA ---
+@st.cache_data(ttl=900)
+def get_data(symbol):
+    try:
+        r = requests.get(TWELVE_DATA_API_URL, params={
+            "symbol": symbol,
+            "interval": INTERVAL,
+            "outputsize": OUTPUT_SIZE,
+            "apikey": API_KEY,
+            "timezone": "UTC"
+        })
+        j = r.json()
+        if "values" not in j:
+            return None
+        df = pd.DataFrame(j["values"])
+        df['datetime'] = pd.to_datetime(df['datetime'])
+        df.set_index('datetime', inplace=True)
+        df = df.sort_index()
+        df = df.astype(float)
+        df.rename(columns={"open":"Open","high":"High","low":"Low","close":"Close"}, inplace=True)
+        return df[['Open','High','Low','Close']]
+    except Exception:
         return None
 
-def apply_indicators(df: pd.DataFrame):
-    df["ema20"] = ta.ema(df["close"], length=20)
-    df["ema50"] = ta.ema(df["close"], length=50)
-    df["hma12"] = ta.hma(df["close"], length=12)
-    return df
+# --- PAIRS ---
+FOREX_PAIRS_TD = [
+    "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD",
+    "EUR/JPY", "GBP/JPY", "EUR/GBP",
+    "XAU/USD", "US30/USD", "NAS100/USD", "SPX/USD"
+]
 
-def evaluate_confluence(df: pd.DataFrame):
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+# --- INDICATEURS ---
+def ema(s, p): return s.ewm(span=p, adjust=False).mean()
+def rma(s, p): return s.ewm(alpha=1/p, adjust=False).mean()
 
-    # HMA Slope
-    hma_slope = 1 if last["hma12"] > prev["hma12"] else -1
+# --- ADX version TradingView ---
+def adx_tradingview(high, low, close, di_len=14, adx_len=14):
+    up = high.diff()
+    down = -low.diff()
+    plus_dm = np.where((up > down) & (up > 0), up, 0.0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+    tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+    tr_rma = rma(tr, di_len)
+    plus = 100 * rma(pd.Series(plus_dm, index=high.index), di_len) / tr_rma.replace(0, 1e-9)
+    minus = 100 * rma(pd.Series(minus_dm, index=high.index), di_len) / tr_rma.replace(0, 1e-9)
+    sum_dm = plus + minus
+    adx = 100 * rma(abs(plus - minus) / sum_dm.replace(0, 1e-9), adx_len)
+    return adx
 
-    # EMA Trend
-    ema_trend = 1 if last["ema20"] > last["ema50"] else -1
+# --- SIGNALS ---
+def confluence_stars(val):
+    if val == 6: return "⭐⭐⭐⭐⭐⭐"
+    elif val == 5: return "⭐⭐⭐⭐⭐"
+    elif val == 4: return "⭐⭐⭐⭐"
+    elif val == 3: return "⭐⭐⭐"
+    elif val == 2: return "⭐⭐"
+    elif val == 1: return "⭐"
+    else: return "WAIT"
 
-    # HMA vs EMA20
-    hma_vs_ema = 1 if last["hma12"] > last["ema20"] else -1
+def calculate_signals(df):
+    if df is None or len(df) < 60:
+        return None
+    ohlc4 = df[['Open','High','Low','Close']].mean(axis=1)
+    signals = {}
+    bull = bear = 0
 
-    # Confluence Score
-    bull = sum([hma_slope == 1, ema_trend == 1, hma_vs_ema == 1])
-    bear = sum([hma_slope == -1, ema_trend == -1, hma_vs_ema == -1])
-    score = bull if bull >= bear else bear
+    hma = df['Close'].rolling(9).mean()  # approximation de HMA
+    if hma.iloc[-1] > hma.iloc[-2]: bull += 1; signals['HMA'] = "▲"
+    elif hma.iloc[-1] < hma.iloc[-2]: bear += 1; signals['HMA'] = "▼"
 
-    signal = "BUY" if bull > bear and score >= 5 else ("SELL" if bear > bull and score >= 5 else "WAIT")
-    stars = "⭐" * score if signal != "WAIT" else "WAIT"
+    rsi_val = rsi(ohlc4, 10).iloc[-1]
+    signals['RSI'] = f"{int(rsi_val)}"
+    if rsi_val > 50: bull += 1
+    elif rsi_val < 50: bear += 1
 
-    return stars, signal, hma_slope, ema_trend, hma_vs_ema
+    adx_val = adx_tradingview(df['High'], df['Low'], df['Close'], di_len=14, adx_len=14).iloc[-1]
+    signals['ADX'] = f"{int(adx_val)}"
+    if adx_val >= 20: bull += 1; bear += 1
 
-# Interface
-if st.button("Lancer le Scan"):
-    if not API_KEY:
-        st.error("Clé API Twelve Data manquante. Ajoutez-la dans .streamlit/secrets.toml.")
+    ha_open = (df['Open'].shift(1) + df['Close'].shift(1)) / 2
+    ha_close = (df[['Open','High','Low','Close']].sum(axis=1)) / 4
+    if ha_close.iloc[-1] > ha_open.iloc[-1]: bull += 1; signals['HA'] = "▲"
+    elif ha_close.iloc[-1] < ha_open.iloc[-1]: bear += 1; signals['HA'] = "▼"
+
+    sha = df['Close'].ewm(span=10).mean()
+    sha_open = df['Open'].ewm(span=10).mean()
+    if sha.iloc[-1] > sha_open.iloc[-1]: bull += 1; signals['SHA'] = "▲"
+    elif sha.iloc[-1] < sha_open.iloc[-1]: bear += 1; signals['SHA'] = "▼"
+
+    tenkan = (df['High'].rolling(9).max() + df['Low'].rolling(9).min()) / 2
+    kijun = (df['High'].rolling(26).max() + df['Low'].rolling(26).min()) / 2
+    senkou_a = (tenkan + kijun) / 2
+    senkou_b = (df['High'].rolling(52).max() + df['Low'].rolling(52).min()) / 2
+    price = df['Close'].iloc[-1]
+    ichi_signal = 1 if price > max(senkou_a.iloc[-1], senkou_b.iloc[-1]) else -1 if price < min(senkou_a.iloc[-1], senkou_b.iloc[-1]) else 0
+    if ichi_signal == 1: bull += 1; signals['Ichimoku'] = "▲"
+    elif ichi_signal == -1: bear += 1; signals['Ichimoku'] = "▼"
+    else: signals['Ichimoku'] = "—"
+
+    confluence = max(bull, bear)
+    direction = "HAUSSIER" if bull > bear else "BAISSIER" if bear > bull else "NEUTRE"
+    stars = confluence_stars(confluence)
+
+    return {"confluence": confluence, "direction": direction, "stars": stars, "signals": signals}
+
+def rsi(src, p):
+    d = src.diff(); g = d.where(d > 0, 0.0); l = -d.where(d < 0, 0.0)
+    rs = rma(g, p) / rma(l, p).replace(0, 1e-9)
+    return 100 - 100 / (1 + rs)
+
+# --- INTERFACE UTILISATEUR ---
+st.sidebar.header("Paramètres")
+min_conf = st.sidebar.slider("Confluence minimale", 0, 6, 3)
+show_all = st.sidebar.checkbox("Afficher toutes les paires", value=False)
+
+if st.sidebar.button("Lancer le scan"):
+    results = []
+    for i, symbol in enumerate(FOREX_PAIRS_TD):
+        st.sidebar.write(f"{symbol} ({i+1}/{len(FOREX_PAIRS_TD)})")
+        df = get_data(symbol)
+        time.sleep(1.0)
+        res = calculate_signals(df)
+        if res:
+            if show_all or res['confluence'] >= min_conf:
+                color = 'green' if res['direction'] == 'HAUSSIER' else 'red' if res['direction'] == 'BAISSIER' else 'gray'
+                row = {
+                    "Paire": symbol.replace("/", ""),
+                    "Confluences": res['stars'],
+                    "Direction": f"<span style='color:{color}'>{res['direction']}</span>",
+                }
+                row.update(res['signals'])
+                results.append(row)
+
+    if results:
+        df_res = pd.DataFrame(results).sort_values(by="Confluences", ascending=False)
+        st.markdown(df_res.to_html(escape=False, index=False), unsafe_allow_html=True)
+        st.download_button("📂 Exporter CSV", data=df_res.to_csv(index=False).encode('utf-8'), file_name="confluences.csv", mime="text/csv")
     else:
-        result_rows = []
-        progress = st.progress(0)
+        st.warning("Aucun résultat correspondant aux critères.")
 
-        for i, pair in enumerate(MAJOR_PAIRS):
-            df = get_data_twelvedata(pair, INTERVAL, API_KEY)
-            if df is not None and len(df) > 50:
-                df = apply_indicators(df)
-                stars, signal, slope, trend, hma_pos = evaluate_confluence(df)
-                result_rows.append({
-                    "Paire": pair,
-                    "Signal": signal,
-                    "Note": stars,
-                    "HMA Slope": "▲" if slope == 1 else "▼",
-                    "EMA Trend": "▲" if trend == 1 else "▼",
-                    "HMA>EMA20": "✔" if hma_pos == 1 else "✖",
-                })
-            progress.progress((i + 1) / len(MAJOR_PAIRS))
-
-        if result_rows:
-            df_result = pd.DataFrame(result_rows)
-            st.dataframe(df_result, use_container_width=True)
-        else:
-            st.warning("Aucun résultat disponible.")
-
+st.caption(f"Dernière mise à jour : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
