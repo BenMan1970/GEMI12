@@ -7,7 +7,6 @@ import time
 
 # =============================================================================
 # MODIFICATION DEMANDÉE : Fonction de calcul PRÉCIS de l'ADX
-# C'est la seule modification apportée à la logique de calcul.
 # =============================================================================
 
 def rma(series: pd.Series, length: int) -> pd.Series:
@@ -17,8 +16,7 @@ def rma(series: pd.Series, length: int) -> pd.Series:
 def calculate_adx_precise(df: pd.DataFrame, di_len: int = 14, adx_len: int = 14) -> pd.Series:
     """Calcule l'ADX en suivant exactement la logique du script Pine Script."""
     df_ = df.copy()
-    up = df_['high'].diff()
-    down = -df_['low'].diff()
+    up = df_['high'].diff(); down = -df_['low'].diff()
     plus_dm = np.where((up > down) & (up > 0), up, 0)
     minus_dm = np.where((down > up) & (down > 0), down, 0)
     true_range = ta.true_range(df_['high'], df_['low'], df_['close'])
@@ -33,45 +31,44 @@ def calculate_adx_precise(df: pd.DataFrame, di_len: int = 14, adx_len: int = 14)
     return adx_value
 
 # =============================================================================
-# LOGIQUE ORIGINALE DES INDICATEURS ET DES CONFLUENCES (INCHANGÉE)
+# LOGIQUE ORIGINALE DES INDICATEURS ET DES CONFLUENCES
 # =============================================================================
 
 def calculate_all_indicators(df: pd.DataFrame):
     params = {"hmaLength": 20, "adxThreshold": 20, "rsiLength": 10, "adxLength": 14, "diLength": 14, "ichimokuLength": 9, "smoothedHaLen1": 10, "smoothedHaLen2": 10}
 
-    # HMA
     df['hma'] = ta.hma(df['close'], length=params['hmaLength'])
     df['hmaSlope'] = np.where(df['hma'] > df['hma'].shift(1), 1, -1)
-
-    # Heikin Ashi et Smoothed Heikin Ashi (logique originale, plus simple)
-    ha_df = ta.ha(df['open'], df['high'], df['low'], df['close'])
-    df['haSignal'] = np.where(ha_df['HA_close'] > ha_df['HA_open'], 1, -1)
     
-    smoothed_ha_df = ta.ha(df['open'].ewm(span=params['smoothedHaLen1'], adjust=False).mean(), df['high'].ewm(span=params['smoothedHaLen1'], adjust=False).mean(), df['low'].ewm(span=params['smoothedHaLen1'], adjust=False).mean(), df['close'].ewm(span=params['smoothedHaLen1'], adjust=False).mean())
-    o2 = smoothed_ha_df['HA_open'].ewm(span=params['smoothedHaLen2'], adjust=False).mean()
-    c2 = smoothed_ha_df['HA_close'].ewm(span=params['smoothedHaLen2'], adjust=False).mean()
-    df['smoothedHaSignal'] = np.where(o2 > c2, -1, 1)
+    ha_df = ta.ha(df['open'], df['high'], df['low'], df['close'])
+    if ha_df is not None and not ha_df.empty:
+        df['haSignal'] = np.where(ha_df['HA_close'] > ha_df['HA_open'], 1, -1)
+    else:
+        df['haSignal'] = 0
 
-    # RSI (sur hlc4)
+    smoothed_ha_df = ta.ha(df['open'].ewm(span=params['smoothedHaLen1'], adjust=False).mean(), df['high'].ewm(span=params['smoothedHaLen1'], adjust=False).mean(), df['low'].ewm(span=params['smoothedHaLen1'], adjust=False).mean(), df['close'].ewm(span=params['smoothedHaLen1'], adjust=False).mean())
+    if smoothed_ha_df is not None and not smoothed_ha_df.empty:
+        o2 = smoothed_ha_df['HA_open'].ewm(span=params['smoothedHaLen2'], adjust=False).mean()
+        c2 = smoothed_ha_df['HA_close'].ewm(span=params['smoothedHaLen2'], adjust=False).mean()
+        df['smoothedHaSignal'] = np.where(o2 > c2, -1, 1)
+    else:
+        df['smoothedHaSignal'] = 0
+
     hlc4 = (df['open'] + df['high'] + df['low'] + df['close']) / 4
     df['rsi'] = ta.rsi(hlc4, length=params['rsiLength'])
     df['rsiSignal'] = np.where(df['rsi'] > 50, 1, -1)
-
-    # --- LIGNE MODIFIÉE ---
-    # On utilise la nouvelle fonction de calcul précis pour l'ADX.
+    
     df['adx'] = calculate_adx_precise(df, di_len=params['diLength'], adx_len=params['adxLength'])
     df['adxHasMomentum'] = df['adx'] >= params['adxThreshold']
 
-    # Ichimoku (logique originale)
     ichimoku_df, _ = ta.ichimoku(df['high'], df['low'], df['close'], tenkan=params['ichimokuLength'], kijun=26, senkou=52)
     if ichimoku_df is not None and not ichimoku_df.empty:
-        cloud_top = ichimoku_df.iloc[:,0:2].max(axis=1) # Utilise l'index de colonne, plus robuste
+        cloud_top = ichimoku_df.iloc[:,0:2].max(axis=1)
         cloud_bottom = ichimoku_df.iloc[:,0:2].min(axis=1)
         df['ichimokuSignal'] = np.select([df['close'] > cloud_top, df['close'] < cloud_bottom], [1, -1], default=0)
     else:
         df['ichimokuSignal'] = 0
 
-    # Calcul des Confluences
     bull_conditions = [df['hmaSlope'] == 1, df['haSignal'] == 1, df['smoothedHaSignal'] == 1, df['rsiSignal'] == 1, df['adxHasMomentum'], df['ichimokuSignal'] == 1]
     df['bullConfluences'] = np.sum(bull_conditions, axis=0)
     bear_conditions = [df['hmaSlope'] == -1, df['haSignal'] == -1, df['smoothedHaSignal'] == -1, df['rsiSignal'] == -1, df['adxHasMomentum'], df['ichimokuSignal'] == -1]
@@ -80,7 +77,7 @@ def calculate_all_indicators(df: pd.DataFrame):
     return df
 
 # =============================================================================
-# INTERFACE STREAMLIT (Structure originale, INCHANGÉE)
+# INTERFACE STREAMLIT (Structure originale)
 # =============================================================================
 
 st.set_page_config(layout="wide")
@@ -124,8 +121,6 @@ if st.button("Lancer le Scan"):
                 all_results.append(last_row)
             
             progress_bar.progress((i + 1) / len(forex_pairs))
-            
-            # Pause de 8 secondes pour respecter la limite de l'API (8 appels/minute)
             time.sleep(8) 
 
         if all_results:
@@ -142,4 +137,3 @@ if st.button("Lancer le Scan"):
             display_df['HA'] = results_df['haSignal'].apply(get_signal_char)
             display_df['HA+'] = results_df['smoothedHaSignal'].apply(get_signal_char)
             st.dataframe(display_df, use_container_width=True)
-         
