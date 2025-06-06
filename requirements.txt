@@ -1,4 +1,4 @@
-streamlit
 pandas
+pandas-ta
 numpy
-requests
+streamlit
