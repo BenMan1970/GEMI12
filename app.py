@@ -2,18 +2,16 @@ import streamlit as st
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
-import requests # Pour faire les appels à l'API Twelve Data
+import requests
 
 # =============================================================================
-# FONCTIONS DE CALCUL (Équivalents Pine Script, Précis et Corrigés)
+# FONCTIONS DE CALCUL (Inchangées, elles sont correctes)
 # =============================================================================
 
 def rma(series: pd.Series, length: int) -> pd.Series:
-    """Calcule la Relative Moving Average (RMA) de Wilder."""
     return series.ewm(alpha=1/length, min_periods=length).mean()
 
 def calculate_adx(df: pd.DataFrame, di_len: int = 14, adx_len: int = 14) -> pd.Series:
-    """Calcule l'ADX en suivant exactement la logique du script Pine Script."""
     df_ = df.copy()
     up = df_['high'].diff()
     down = -df_['low'].diff()
@@ -31,7 +29,6 @@ def calculate_adx(df: pd.DataFrame, di_len: int = 14, adx_len: int = 14) -> pd.S
     return adx_value
 
 def calculate_heikin_ashi_simple(df: pd.DataFrame):
-    """Calcule le signal Heikin Ashi simple."""
     ha_close = (df['open'] + df['high'] + df['low'] + df['close']) / 4
     ha_open = pd.Series(np.nan, index=df.index)
     if not df.empty:
@@ -41,7 +38,6 @@ def calculate_heikin_ashi_simple(df: pd.DataFrame):
     return ha_close, ha_open
 
 def calculate_smoothed_heikin_ashi(df: pd.DataFrame, len1: int = 10, len2: int = 10):
-    """Calcule le signal Heikin Ashi lissé (+)."""
     o1 = df['open'].ewm(span=len1, adjust=False).mean()
     c1 = df['close'].ewm(span=len1, adjust=False).mean()
     h1 = df['high'].ewm(span=len1, adjust=False).mean()
@@ -57,56 +53,30 @@ def calculate_smoothed_heikin_ashi(df: pd.DataFrame, len1: int = 10, len2: int =
     return o2, c2
 
 def calculate_all_indicators(df: pd.DataFrame):
-    """Fonction principale qui calcule tous les indicateurs et les signaux."""
-    params = {
-        "hmaLength": 20, "adxThreshold": 20, "rsiLength": 10,
-        "adxLength": 14, "diLength": 14, "ichimokuLength": 9,
-        "smoothedHaLen1": 10, "smoothedHaLen2": 10,
-    }
-
+    params = {"hmaLength": 20, "adxThreshold": 20, "rsiLength": 10, "adxLength": 14, "diLength": 14, "ichimokuLength": 9, "smoothedHaLen1": 10, "smoothedHaLen2": 10}
     df['hma'] = ta.hma(df['close'], length=params['hmaLength'])
     df['hmaSlope'] = np.where(df['hma'] > df['hma'].shift(1), 1, -1)
-    
     ha_close, ha_open = calculate_heikin_ashi_simple(df)
     df['haSignal'] = np.where(ha_close > ha_open, 1, -1)
-
     o2, c2 = calculate_smoothed_heikin_ashi(df, params['smoothedHaLen1'], params['smoothedHaLen2'])
     df['smoothedHaSignal'] = np.where(o2 > c2, -1, 1)
-
     hlc4 = (df['open'] + df['high'] + df['low'] + df['close']) / 4
     df['rsi'] = ta.rsi(hlc4, length=params['rsiLength'])
     df['rsiSignal'] = np.where(df['rsi'] > 50, 1, -1)
-
     df['adx'] = calculate_adx(df, di_len=params['diLength'], adx_len=params['adxLength'])
     df['adxHasMomentum'] = df['adx'] >= params['adxThreshold']
-
-    # --- BLOC ICHIMOKU CORRIGÉ ET ROBUSTE ---
-    ichimoku_df, _ = ta.ichimoku(df['high'], df['low'], df['close'], 
-                                tenkan=params['ichimokuLength'], kijun=26, senkou=52)
-    
+    ichimoku_df, _ = ta.ichimoku(df['high'], df['low'], df['close'], tenkan=params['ichimokuLength'], kijun=26, senkou=52)
     if ichimoku_df is not None and not ichimoku_df.empty:
         ichimoku_df.columns = ['senkouA', 'senkouB', 'tenkan', 'kijun', 'chikou']
-        df['tenkan'] = ichimoku_df['tenkan']
-        df['kijun'] = ichimoku_df['kijun']
-        df['senkouA'] = ichimoku_df['senkouA']
-        df['senkouB'] = ichimoku_df['senkouB']
+        df['tenkan'], df['kijun'], df['senkouA'], df['senkouB'] = ichimoku_df['tenkan'], ichimoku_df['kijun'], ichimoku_df['senkouA'], ichimoku_df['senkouB']
         cloud_top = df[['senkouA', 'senkouB']].max(axis=1)
         cloud_bottom = df[['senkouA', 'senkouB']].min(axis=1)
-        df['ichimokuSignal'] = np.select(
-            [df['close'] > cloud_top, df['close'] < cloud_bottom], [1, -1], default=0)
+        df['ichimokuSignal'] = np.select([df['close'] > cloud_top, df['close'] < cloud_bottom], [1, -1], default=0)
     else:
         df['ichimokuSignal'] = 0
-
-    # --- CALCUL DES CONFLUENCES ---
-    bull_conditions = [
-        df['hmaSlope'] == 1, df['haSignal'] == 1, df['smoothedHaSignal'] == 1,
-        df['rsiSignal'] == 1, df['adxHasMomentum'], df['ichimokuSignal'] == 1
-    ]
+    bull_conditions = [df['hmaSlope'] == 1, df['haSignal'] == 1, df['smoothedHaSignal'] == 1, df['rsiSignal'] == 1, df['adxHasMomentum'], df['ichimokuSignal'] == 1]
     df['bullConfluences'] = np.sum(bull_conditions, axis=0)
-    bear_conditions = [
-        df['hmaSlope'] == -1, df['haSignal'] == -1, df['smoothedHaSignal'] == -1,
-        df['rsiSignal'] == -1, df['adxHasMomentum'], df['ichimokuSignal'] == -1
-    ]
+    bear_conditions = [df['hmaSlope'] == -1, df['haSignal'] == -1, df['smoothedHaSignal'] == -1, df['rsiSignal'] == -1, df['adxHasMomentum'], df['ichimokuSignal'] == -1]
     df['bearConfluences'] = np.sum(bear_conditions, axis=0)
     df['confluence'] = df[['bullConfluences', 'bearConfluences']].max(axis=1)
     return df
@@ -118,68 +88,68 @@ def calculate_all_indicators(df: pd.DataFrame):
 st.set_page_config(layout="wide")
 st.title("Canadian Confluence Scanner (Twelve Data API)")
 
-# Clé API - À stocker de manière sécurisée avec les Secrets de Streamlit
-api_key = st.secrets.get("TWELVE_DATA_API_KEY", "VOTRE_API_KEY_PAR_DEFAUT_ICI")
+api_key = st.secrets.get("TWELVE_DATA_API_KEY", "")
 
-# Listes des actifs
-forex_pairs = ['EUR/USD', 'GBP/USD', 'USD/JPY', 'AUD/USD', 'USD/CAD', 'USD/CHF', 'NZD/USD', 'EUR/GBP', 'EUR/JPY', 'EUR/AUD', 'EUR/CAD', 'EUR/CHF', 'EUR/NZD', 'GBP/JPY', 'GBP/AUD', 'GBP/CAD', 'GBP/CHF', 'GBP/NZD', 'AUD/JPY', 'AUD/CAD', 'AUD/CHF', 'AUD/NZD', 'CAD/JPY', 'CAD/CHF', 'CHF/JPY', 'NZD/JPY', 'NZD/CAD', 'NZD/CHF']
+# === MODIFICATION N°1 : Format des paires de devises corrigé (sans le "/") ===
+forex_pairs = ['EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD', 'USDCAD', 'USDCHF', 'NZDUSD', 'EURGBP', 'EURJPY', 'EURAUD', 'EURCAD', 'EURCHF', 'EURNZD', 'GBPJPY', 'GBPAUD', 'GBPCAD', 'GBPCHF', 'GBPNZD', 'AUDJPY', 'AUDCAD', 'AUDCHF', 'AUDNZD', 'CADJPY', 'CADCHF', 'CHFJPY', 'NZDJPY', 'NZDCAD', 'NZDCHF']
 timeframes = {"15min": "15min", "30min": "30min", "1h": "1h", "4h": "4h", "1day": "1day"}
 
 selected_tf = st.selectbox("Sélectionnez le Timeframe", list(timeframes.keys()))
 
 def get_twelve_data(symbol, interval, api_key):
-    """Récupère les données de l'API Twelve Data."""
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=200&apikey={api_key}"
+    """Récupère les données de l'API Twelve Data et gère les erreurs."""
+    # Note: L'API attend le format "EUR/USD" pour le symbole, on le reconstruit ici.
+    symbol_with_slash = f"{symbol[:3]}/{symbol[3:]}"
+    url = f"https://api.twelvedata.com/time_series?symbol={symbol_with_slash}&interval={interval}&outputsize=200&apikey={api_key}"
     response = requests.get(url)
     data = response.json()
-    if data['status'] == 'ok':
-        df = pd.DataFrame(data['values'])
-        df['datetime'] = pd.to_datetime(df['datetime'])
-        df = df.set_index('datetime')
-        df = df.astype(float)
-        # L'API retourne les données du plus récent au plus ancien, il faut les inverser.
-        return df.iloc[::-1]
-    return None
+    
+    # === MODIFICATION N°2 : Amélioration du débogage ===
+    # Si le statut n'est pas 'ok', on affiche le message d'erreur de l'API.
+    if data.get('status') != 'ok':
+        st.error(f"Erreur API pour {symbol_with_slash}: {data.get('message', 'Réponse invalide')}")
+        return None
+
+    df = pd.DataFrame(data['values'])
+    df['datetime'] = pd.to_datetime(df['datetime'])
+    df = df.set_index('datetime')
+    df = df.astype(float)
+    return df.iloc[::-1]
 
 if st.button("Lancer le Scan"):
-    all_results = []
-    progress_bar = st.progress(0)
-    
-    for i, pair in enumerate(forex_pairs):
-        try:
+    if not api_key:
+        st.error("Clé API Twelve Data non configurée. Veuillez l'ajouter dans les 'Secrets' de Streamlit.")
+    else:
+        all_results = []
+        progress_bar = st.progress(0)
+        
+        for i, pair in enumerate(forex_pairs):
             df_ohlc = get_twelve_data(pair, timeframes[selected_tf], api_key)
             if df_ohlc is None or df_ohlc.empty:
-                st.warning(f"Pas de données pour {pair} sur le timeframe {selected_tf}")
+                # Le message d'erreur est déjà affiché par get_twelve_data
                 continue
             
             df_final = calculate_all_indicators(df_ohlc.copy())
             last_row = df_final.iloc[-1].copy()
-            last_row['Pair'] = pair
+            last_row['Pair'] = f"{pair[:3]}/{pair[3:]}" # On réaffiche avec le "/" pour la lisibilité
             all_results.append(last_row)
-        except Exception as e:
-            st.error(f"Erreur lors du traitement de la paire {pair}: {e}")
-        
-        progress_bar.progress((i + 1) / len(forex_pairs))
+            
+            progress_bar.progress((i + 1) / len(forex_pairs))
 
-    if all_results:
-        results_df = pd.DataFrame(all_results)
-        
-        # Fonctions pour l'affichage
-        def get_star_rating(c): return "⭐" * int(c) if c > 0 else "WAIT"
-        def get_signal_char(s): return "▲" if s == 1 else ("▼" if s == -1 else "─")
+        if all_results:
+            results_df = pd.DataFrame(all_results)
+            def get_star_rating(c): return "⭐" * int(c) if c > 0 else "WAIT"
+            def get_signal_char(s): return "▲" if s == 1 else ("▼" if s == -1 else "─")
 
-        # Mise en forme du tableau final
-        display_df = pd.DataFrame()
-        display_df['Paire'] = results_df['Pair']
-        display_df['Note'] = results_df['confluence'].apply(get_star_rating)
-        
-        display_df['ADX'] = results_df.apply(lambda row: f"✔ ({row['adx']:.1f})" if row['adxHasMomentum'] else f"✖ ({row['adx']:.1f})", axis=1)
-        display_df['RSI'] = results_df['rsiSignal'].apply(get_signal_char)
-        display_df['Ichi'] = results_df['ichimokuSignal'].apply(get_signal_char)
-        display_df['HMA'] = results_df['hmaSlope'].apply(get_signal_char)
-        display_df['HA'] = results_df['haSignal'].apply(get_signal_char)
-        display_df['HA+'] = results_df['smoothedHaSignal'].apply(get_signal_char)
-        
-        st.dataframe(display_df, use_container_width=True)
-    else:
-        st.info("Aucun résultat n'a pu être généré. Vérifiez votre clé API ou la disponibilité des données.")
+            display_df = pd.DataFrame()
+            display_df['Paire'] = results_df['Pair']
+            display_df['Note'] = results_df['confluence'].apply(get_star_rating)
+            display_df['ADX'] = results_df.apply(lambda row: f"✔ ({row['adx']:.1f})" if row['adxHasMomentum'] else f"✖ ({row['adx']:.1f})", axis=1)
+            display_df['RSI'] = results_df['rsiSignal'].apply(get_signal_char)
+            display_df['Ichi'] = results_df['ichimokuSignal'].apply(get_signal_char)
+            display_df['HMA'] = results_df['hmaSlope'].apply(get_signal_char)
+            display_df['HA'] = results_df['haSignal'].apply(get_signal_char)
+            display_df['HA+'] = results_df['smoothedHaSignal'].apply(get_signal_char)
+            st.dataframe(display_df, use_container_width=True)
+        else:
+            st.info("Le scan est terminé, mais aucune donnée n'a pu être traitée. Vérifiez les messages d'erreur de l'API ci-dessus.")
