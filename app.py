@@ -5,28 +5,75 @@ import time
 from datetime import datetime, timezone
 import requests
 
+# --- CONFIGURATION ---
+# Ajoutez vos paramètres ici
+API_KEY = "YOUR_API_KEY_HERE"  # Remplacez par votre clé API Twelve Data
+TWELVE_DATA_API_URL = "https://api.twelvedata.com/time_series"
+INTERVAL = "1h"
+OUTPUT_SIZE = 100
+
+# --- CONFIGURATION STREAMLIT ---
+st.set_page_config(
+    page_title="Forex Scanner",
+    page_icon="📈",
+    layout="wide"
+)
+
 # --- FETCH DATA ---
 @st.cache_data(ttl=900)
 def get_data(symbol):
+    """Récupère les données OHLC depuis l'API Twelve Data"""
     try:
-        r = requests.get(TWELVE_DATA_API_URL, params={
+        params = {
             "symbol": symbol,
             "interval": INTERVAL,
             "outputsize": OUTPUT_SIZE,
             "apikey": API_KEY,
             "timezone": "UTC"
-        })
-        j = r.json()
-        if "values" not in j:
+        }
+        
+        response = requests.get(TWELVE_DATA_API_URL, params=params, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        # Vérification des erreurs API
+        if "code" in data and data["code"] != 200:
+            st.error(f"Erreur API pour {symbol}: {data.get('message', 'Erreur inconnue')}")
             return None
-        df = pd.DataFrame(j["values"])
+            
+        if "values" not in data:
+            st.warning(f"Pas de données disponibles pour {symbol}")
+            return None
+            
+        # Traitement des données
+        df = pd.DataFrame(data["values"])
         df['datetime'] = pd.to_datetime(df['datetime'])
         df.set_index('datetime', inplace=True)
         df = df.sort_index()
-        df = df.astype(float)
-        df.rename(columns={"open":"Open","high":"High","low":"Low","close":"Close"}, inplace=True)
-        return df[['Open','High','Low','Close']]
-    except Exception:
+        
+        # Conversion en float avec gestion des erreurs
+        for col in ['open', 'high', 'low', 'close']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Vérification des données valides
+        if df.isnull().all().all():
+            return None
+            
+        df.rename(columns={
+            "open": "Open",
+            "high": "High", 
+            "low": "Low",
+            "close": "Close"
+        }, inplace=True)
+        
+        return df[['Open', 'High', 'Low', 'Close']]
+        
+    except requests.exceptions.RequestException as e:
+        st.error(f"Erreur de connexion pour {symbol}: {str(e)}")
+        return None
+    except Exception as e:
+        st.error(f"Erreur lors du traitement de {symbol}: {str(e)}")
         return None
 
 # --- PAIRS ---
@@ -36,156 +83,308 @@ FOREX_PAIRS_TD = [
     "XAU/USD", "US30/USD", "NAS100/USD", "SPX/USD"
 ]
 
-# --- INDICATEURS ---
-def ema(s, p): return s.ewm(span=p, adjust=False).mean()
-def rma(s, p): return s.ewm(alpha=1/p, adjust=False).mean()
+# --- INDICATEURS TECHNIQUES ---
+def ema(series, period):
+    """Exponential Moving Average"""
+    return series.ewm(span=period, adjust=False).mean()
 
-# --- SIGNALS ---
-def confluence_stars(val):
-    if val == 6: return "⭐⭐⭐⭐⭐⭐"
-    elif val == 5: return "⭐⭐⭐⭐⭐"
-    elif val == 4: return "⭐⭐⭐⭐"
-    elif val == 3: return "⭐⭐⭐"
-    elif val == 2: return "⭐⭐"
-    elif val == 1: return "⭐"
-    else: return "WAIT"
+def rma(series, period):
+    """Relative Moving Average (Wilder's MA)"""
+    return series.ewm(alpha=1/period, adjust=False).mean()
 
-def calculate_signals(df):
-    if df is None or len(df) < 60:
-        return None
-    ohlc4 = df[['Open','High','Low','Close']].mean(axis=1)
-    signals = {}
-    bull = bear = 0
-
-    hma = df['Close'].rolling(9).mean()  # approximation de HMA
-    if hma.iloc[-1] > hma.iloc[-2]: bull += 1; signals['HMA'] = "▲"
-    elif hma.iloc[-1] < hma.iloc[-2]: bear += 1; signals['HMA'] = "▼"
-
-    rsi_val = rsi(ohlc4, 10).iloc[-1]
-    signals['RSI'] = f"{int(rsi_val)}"
-    if rsi_val > 50: bull += 1
-    elif rsi_val < 50: bear += 1
-
-    adx_val = adx(df['High'], df['Low'], df['Close'], 14).iloc[-1]
-    signals['ADX'] = f"{int(adx_val)}"
-    if adx_val >= 20: bull += 1; bear += 1
-
-    ha_open = (df['Open'].shift(1) + df['Close'].shift(1)) / 2
-    ha_close = (df[['Open','High','Low','Close']].sum(axis=1)) / 4
-    if ha_close.iloc[-1] > ha_open.iloc[-1]: bull += 1; signals['HA'] = "▲"
-    elif ha_close.iloc[-1] < ha_open.iloc[-1]: bear += 1; signals['HA'] = "▼"
-
-    sha = df['Close'].ewm(span=10).mean()
-    sha_open = df['Open'].ewm(span=10).mean()
-    if sha.iloc[-1] > sha_open.iloc[-1]: bull += 1; signals['SHA'] = "▲"
-    elif sha.iloc[-1] < sha_open.iloc[-1]: bear += 1; signals['SHA'] = "▼"
-
-    # Ichimoku simplifié
-    tenkan = (df['High'].rolling(9).max() + df['Low'].rolling(9).min()) / 2
-    kijun = (df['High'].rolling(26).max() + df['Low'].rolling(26).min()) / 2
-    senkou_a = (tenkan + kijun) / 2
-    senkou_b = (df['High'].rolling(52).max() + df['Low'].rolling(52).min()) / 2
-    price = df['Close'].iloc[-1]
-    ichi_signal = 1 if price > max(senkou_a.iloc[-1], senkou_b.iloc[-1]) else -1 if price < min(senkou_a.iloc[-1], senkou_b.iloc[-1]) else 0
-    if ichi_signal == 1: bull += 1; signals['Ichimoku'] = "▲"
-    elif ichi_signal == -1: bear += 1; signals['Ichimoku'] = "▼"
-    else: signals['Ichimoku'] = "—"
-
-    confluence = max(bull, bear)
-    direction = "HAUSSIER" if bull > bear else "BAISSIER" if bear > bull else "NEUTRE"
-    stars = confluence_stars(confluence)
-
-    return {"confluence": confluence, "direction": direction, "stars": stars, "signals": signals}
-
-def rsi(src, p):
-    d = src.diff(); g = d.where(d > 0, 0.0); l = -d.where(d < 0, 0.0)
-    rs = rma(g, p) / rma(l, p).replace(0, 1e-9)
+def rsi(src, period):
+    """Relative Strength Index"""
+    delta = src.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    
+    avg_gain = rma(gain, period)
+    avg_loss = rma(loss, period)
+    
+    rs = avg_gain / avg_loss.replace(0, 1e-9)
     return 100 - 100 / (1 + rs)
 
-def adx(h, l, c, p):
-    # This function implements the ADX calculation based on the provided TradingView script.
-    # Pine Script logic: adx = 100 * ta.rma(math.abs(plus - minus) / (sum == 0 ? 1 : sum), adxlen)
-    # The length 'p' is used for both DI Length (dilen) and ADX Smoothing (adxlen).
-
-    # Calculate True Range (TR)
-    tr = pd.concat([h - l, abs(h - c.shift()), abs(l - c.shift())], axis=1).max(axis=1)
-    rma_tr = rma(tr, p)
-
-    # Calculate Directional Movement (+DM, -DM)
-    up = h.diff()
-    down = -l.diff()
-
-    plus_dm = pd.Series(np.where((up > down) & (up > 0), up, 0.0), index=h.index)
-    minus_dm = pd.Series(np.where((down > up) & (down > 0), down, 0.0), index=h.index)
-
-    # Calculate Directional Indicators (+DI, -DI)
-    safe_rma_tr = rma_tr.replace(0, 1e-9)
-    pdi = 100 * rma(plus_dm, p) / safe_rma_tr
-    mdi = 100 * rma(minus_dm, p) / safe_rma_tr
-
-    # Calculate the unscaled Directional Index (term inside the RMA in Pine Script)
-    di_sum = (pdi + mdi).replace(0, 1.0) # To avoid division by zero, mimicking (sum == 0 ? 1 : sum)
-    dx_unscaled = abs(pdi - mdi) / di_sum
-
-    # Calculate ADX by smoothing the unscaled DX with RMA and then multiplying by 100
-    adx_val = 100 * rma(dx_unscaled, p)
+def adx(high, low, close, period):
+    """Average Directional Index"""
+    # True Range
+    tr1 = high - low
+    tr2 = abs(high - close.shift())
+    tr3 = abs(low - close.shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # Directional Movement
+    up_move = high.diff()
+    down_move = -low.diff()
+    
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0))
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0))
+    
+    # Smoothed values
+    atr = rma(tr, period)
+    plus_di = 100 * rma(plus_dm, period) / atr.replace(0, 1e-9)
+    minus_di = 100 * rma(minus_dm, period) / atr.replace(0, 1e-9)
+    
+    # ADX calculation
+    dx = abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1.0)
+    adx_val = 100 * rma(dx, period)
     
     return adx_val
 
+# --- FONCTIONS DE SIGNAUX ---
+def confluence_stars(val):
+    """Convertit la valeur de confluence en étoiles"""
+    stars_dict = {6: "⭐⭐⭐⭐⭐⭐", 5: "⭐⭐⭐⭐⭐", 4: "⭐⭐⭐⭐", 
+                  3: "⭐⭐⭐", 2: "⭐⭐", 1: "⭐"}
+    return stars_dict.get(val, "WAIT")
+
+def calculate_signals(df):
+    """Calcule les signaux techniques pour un DataFrame OHLC"""
+    if df is None or len(df) < 60:
+        return None
+    
+    try:
+        ohlc4 = df[['Open', 'High', 'Low', 'Close']].mean(axis=1)
+        signals = {}
+        bull_count = bear_count = 0
+
+        # Hull Moving Average (approximation)
+        hma = df['Close'].rolling(window=9, min_periods=1).mean()
+        if len(hma) >= 2:
+            if hma.iloc[-1] > hma.iloc[-2]:
+                bull_count += 1
+                signals['HMA'] = "▲"
+            elif hma.iloc[-1] < hma.iloc[-2]:
+                bear_count += 1
+                signals['HMA'] = "▼"
+            else:
+                signals['HMA'] = "—"
+
+        # RSI
+        rsi_values = rsi(ohlc4, 10)
+        if not rsi_values.empty:
+            rsi_val = rsi_values.iloc[-1]
+            signals['RSI'] = f"{int(rsi_val)}" if not pd.isna(rsi_val) else "N/A"
+            if rsi_val > 50:
+                bull_count += 1
+            elif rsi_val < 50:
+                bear_count += 1
+
+        # ADX
+        adx_values = adx(df['High'], df['Low'], df['Close'], 14)
+        if not adx_values.empty:
+            adx_val = adx_values.iloc[-1]
+            signals['ADX'] = f"{int(adx_val)}" if not pd.isna(adx_val) else "N/A"
+            if adx_val >= 20:
+                # ADX indique la force de la tendance, pas la direction
+                pass
+
+        # Heikin Ashi
+        ha_close = (df[['Open', 'High', 'Low', 'Close']].sum(axis=1)) / 4
+        ha_open = (df['Open'].shift(1) + df['Close'].shift(1)) / 2
+        
+        if len(ha_close) >= 1 and len(ha_open) >= 1:
+            if ha_close.iloc[-1] > ha_open.iloc[-1]:
+                bull_count += 1
+                signals['HA'] = "▲"
+            elif ha_close.iloc[-1] < ha_open.iloc[-1]:
+                bear_count += 1
+                signals['HA'] = "▼"
+            else:
+                signals['HA'] = "—"
+
+        # Smoothed Heikin Ashi
+        sha_close = df['Close'].ewm(span=10).mean()
+        sha_open = df['Open'].ewm(span=10).mean()
+        
+        if len(sha_close) >= 1 and len(sha_open) >= 1:
+            if sha_close.iloc[-1] > sha_open.iloc[-1]:
+                bull_count += 1
+                signals['SHA'] = "▲"
+            elif sha_close.iloc[-1] < sha_open.iloc[-1]:
+                bear_count += 1
+                signals['SHA'] = "▼"
+            else:
+                signals['SHA'] = "—"
+
+        # Ichimoku (simplifié)
+        if len(df) >= 52:
+            tenkan = (df['High'].rolling(9).max() + df['Low'].rolling(9).min()) / 2
+            kijun = (df['High'].rolling(26).max() + df['Low'].rolling(26).min()) / 2
+            senkou_a = (tenkan + kijun) / 2
+            senkou_b = (df['High'].rolling(52).max() + df['Low'].rolling(52).min()) / 2
+            
+            current_price = df['Close'].iloc[-1]
+            cloud_top = max(senkou_a.iloc[-1], senkou_b.iloc[-1])
+            cloud_bottom = min(senkou_a.iloc[-1], senkou_b.iloc[-1])
+            
+            if current_price > cloud_top:
+                bull_count += 1
+                signals['Ichimoku'] = "▲"
+            elif current_price < cloud_bottom:
+                bear_count += 1
+                signals['Ichimoku'] = "▼"
+            else:
+                signals['Ichimoku'] = "—"
+        else:
+            signals['Ichimoku'] = "N/A"
+
+        # Calcul final
+        confluence = max(bull_count, bear_count)
+        if bull_count > bear_count:
+            direction = "HAUSSIER"
+        elif bear_count > bull_count:
+            direction = "BAISSIER"
+        else:
+            direction = "NEUTRE"
+            
+        stars = confluence_stars(confluence)
+
+        return {
+            "confluence": confluence,
+            "direction": direction,
+            "stars": stars,
+            "signals": signals,
+            "bull_count": bull_count,
+            "bear_count": bear_count
+        }
+        
+    except Exception as e:
+        st.error(f"Erreur dans le calcul des signaux: {str(e)}")
+        return None
+
 # --- INTERFACE UTILISATEUR ---
-st.sidebar.header("Paramètres")
-min_conf = st.sidebar.slider("Confluence minimale", 0, 6, 3)
-show_all = st.sidebar.checkbox("Afficher toutes les paires", value=False)
+def main():
+    st.title("📈 Forex Scanner - Analyse de Confluences")
+    st.markdown("---")
+    
+    # Vérification de la clé API
+    if API_KEY == "YOUR_API_KEY_HERE" or not API_KEY:
+        st.error("⚠️ **Configuration requise**: Veuillez définir votre clé API Twelve Data dans le script.")
+        st.info("Modifiez la variable `API_KEY` avec votre clé API valide.")
+        st.stop()
+    
+    # Sidebar
+    st.sidebar.header("⚙️ Paramètres")
+    min_conf = st.sidebar.slider("Confluence minimale", 0, 6, 3)
+    show_all = st.sidebar.checkbox("Afficher toutes les paires", value=False)
+    
+    # Informations
+    st.sidebar.markdown("---")
+    st.sidebar.info(f"**Intervalle:** {INTERVAL}\n**Données:** {OUTPUT_SIZE} bougies")
+    
+    # Bouton de scan
+    if st.sidebar.button("🚀 Lancer le scan", type="primary"):
+        scan_forex_pairs(min_conf, show_all)
+    
+    # Instructions
+    with st.expander("ℹ️ Comment utiliser ce scanner"):
+        st.markdown("""
+        **Étapes:**
+        1. Configurez la confluence minimale (nombre d'indicateurs en accord)
+        2. Choisissez d'afficher toutes les paires ou seulement celles qui respectent le critère
+        3. Cliquez sur "Lancer le scan"
+        
+        **Indicateurs utilisés:**
+        - **HMA**: Hull Moving Average (approximation)
+        - **RSI**: Relative Strength Index
+        - **ADX**: Average Directional Index
+        - **HA**: Heikin Ashi
+        - **SHA**: Smoothed Heikin Ashi
+        - **Ichimoku**: Analyse des nuages Ichimoku
+        
+        **Symboles:**
+        - ▲ = Signal haussier
+        - ▼ = Signal baissier
+        - — = Signal neutre
+        """)
 
-# This part of the code requires your API key and settings. 
-# Make sure to define them before running the script.
-# For example:
-# API_KEY = "YOUR_API_KEY"
-# TWELVE_DATA_API_URL = "https://api.twelvedata.com/time_series"
-# INTERVAL = "1h"
-# OUTPUT_SIZE = 100
-
-if st.sidebar.button("Lancer le scan"):
-    # Check if API_KEY is defined
-    if 'API_KEY' not in locals() or not API_KEY:
-        st.error("Veuillez définir votre `API_KEY` dans le script.")
-    else:
-        results = []
-        progress_bar = st.sidebar.progress(0)
-        status_text = st.sidebar.empty()
-
+def scan_forex_pairs(min_conf, show_all):
+    """Lance le scan des paires forex"""
+    results = []
+    
+    # Conteneurs pour l'affichage du progrès
+    progress_container = st.container()
+    results_container = st.container()
+    
+    with progress_container:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
         for i, symbol in enumerate(FOREX_PAIRS_TD):
-            status_text.write(f"Scan en cours: {symbol} ({i+1}/{len(FOREX_PAIRS_TD)})")
+            status_text.write(f"🔍 Analyse en cours: **{symbol}** ({i+1}/{len(FOREX_PAIRS_TD)})")
+            
+            # Récupération et analyse des données
             df = get_data(symbol)
-            time.sleep(1.0) # Respect API rate limits
-            res = calculate_signals(df)
-            if res:
-                if show_all or res['confluence'] >= min_conf:
-                    color = 'green' if res['direction'] == 'HAUSSIER' else 'red' if res['direction'] == 'BAISSIER' else 'gray'
+            
+            if df is not None:
+                signals_result = calculate_signals(df)
+                
+                if signals_result and (show_all or signals_result['confluence'] >= min_conf):
+                    # Détermination de la couleur
+                    if signals_result['direction'] == 'HAUSSIER':
+                        color = 'green'
+                    elif signals_result['direction'] == 'BAISSIER':
+                        color = 'red'
+                    else:
+                        color = 'gray'
+                    
+                    # Création de la ligne de résultat
                     row = {
                         "Paire": symbol.replace("/", ""),
-                        "Confluences": res['stars'],
-                        "Direction": f"<span style='color:{color}'>{res['direction']}</span>",
+                        "Confluences": signals_result['stars'],
+                        "Direction": f"<span style='color:{color}; font-weight:bold'>{signals_result['direction']}</span>",
+                        "Score": f"{signals_result['bull_count']}/{signals_result['bear_count']}"
                     }
-                    row.update(res['signals'])
+                    
+                    # Ajout des signaux individuels
+                    row.update(signals_result['signals'])
                     results.append(row)
+            
+            # Respect des limites de l'API
+            time.sleep(1.2)  # Pause entre les requêtes
             progress_bar.progress((i + 1) / len(FOREX_PAIRS_TD))
         
-        status_text.write("Scan terminé !")
+        status_text.success("✅ Scan terminé !")
+        time.sleep(1)
         progress_bar.empty()
-
+        status_text.empty()
+    
+    # Affichage des résultats
+    with results_container:
         if results:
-            df_res = pd.DataFrame(results)
-            # Ensure specific column order
-            cols = ["Paire", "Confluences", "Direction", "HMA", "RSI", "ADX", "HA", "SHA", "Ichimoku"]
-            # Filter for columns that actually exist in the dataframe to avoid errors
-            existing_cols = [col for col in cols if col in df_res.columns]
-            df_res = df_res[existing_cols]
-
-            df_res = df_res.sort_values(by="Confluences", ascending=False)
-            st.markdown(df_res.to_html(escape=False, index=False), unsafe_allow_html=True)
-            st.download_button("📂 Exporter CSV", data=df_res.to_csv(index=False).encode('utf-8'), file_name="confluences.csv", mime="text/csv")
+            st.success(f"🎯 **{len(results)} paires trouvées** (confluence ≥ {min_conf})")
+            
+            df_results = pd.DataFrame(results)
+            
+            # Ordre des colonnes
+            base_cols = ["Paire", "Confluences", "Direction", "Score"]
+            signal_cols = ["HMA", "RSI", "ADX", "HA", "SHA", "Ichimoku"]
+            
+            existing_cols = base_cols + [col for col in signal_cols if col in df_results.columns]
+            df_results = df_results[existing_cols]
+            
+            # Tri par confluence (décroissant)
+            df_results = df_results.sort_values(by="Confluences", ascending=False)
+            
+            # Affichage du tableau
+            st.markdown(df_results.to_html(escape=False, index=False), unsafe_allow_html=True)
+            
+            # Bouton de téléchargement
+            csv_data = df_results.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📂 Exporter en CSV",
+                data=csv_data,
+                file_name=f"confluences_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                mime="text/csv"
+            )
+            
         else:
-            st.warning("Aucun résultat correspondant aux critères.")
+            st.warning("⚠️ Aucune paire ne correspond aux critères définis.")
+            st.info("Essayez de réduire la confluence minimale ou d'activer 'Afficher toutes les paires'.")
+    
+    # Footer avec timestamp
+    st.markdown("---")
+    st.caption(f"Dernière mise à jour : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
 
-st.caption(f"Dernière mise à jour : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
+if __name__ == "__main__":
+    main()
