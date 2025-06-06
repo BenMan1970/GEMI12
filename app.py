@@ -1,190 +1,211 @@
-# app.py
-import streamlit as st
 import pandas as pd
+import pandas_ta as ta
 import numpy as np
-from datetime import datetime, timezone
-import time
-import traceback
-import requests
 
-# --- CONFIG STREAMLIT ---
-st.set_page_config(page_title="Scanner Confluence Forex (Twelve Data)", page_icon="⭐", layout="wide")
-st.title("🔍 Scanner Confluence Forex Premium (Twelve Data)")
-st.markdown("*Utilisation de l'API Twelve Data pour les données de marché H1*")
+# =============================================================================
+# FONCTIONS DE CALCUL (Équivalents Pine Script)
+# =============================================================================
 
-# --- API CONFIG ---
-TWELVE_DATA_API_URL = "https://api.twelvedata.com/time_series"
-API_KEY = st.secrets.get("TWELVE_DATA_API_KEY")
-if not API_KEY:
-    st.error("Clé API manquante. Ajoutez-la dans .streamlit/secrets.toml : TWELVE_DATA_API_KEY = '...' ")
-    st.stop()
+def rma(series: pd.Series, length: int) -> pd.Series:
+    """
+    Calcule la Relative Moving Average (RMA) de Wilder.
+    Équivalent exact de ta.rma() en Pine Script.
+    """
+    return series.ewm(alpha=1/length, min_periods=length).mean()
 
-FOREX_PAIRS_TD = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/JPY", "GBP/JPY", "EUR/GBP"]
-INTERVAL = "1h"
-OUTPUT_SIZE = 250
+def calculate_adx(df: pd.DataFrame, di_len: int = 14, adx_len: int = 14) -> pd.Series:
+    """
+    Calcule l'ADX en suivant exactement la logique du script Pine Script.
+    Équivalent de la fonction f_adx()
+    """
+    # Copie pour éviter les modifications sur le DataFrame original
+    df_ = df.copy()
 
-# --- INDICATEURS ---
-def ema(s, p): return s.ewm(span=p, adjust=False).mean()
-def rma(s, p): return s.ewm(alpha=1/p, adjust=False).mean()
+    # up = ta.change(high)
+    # down = -ta.change(low)
+    up = df_['high'].diff()
+    down = -df_['low'].diff()
 
-def hull_ma(s, p):
-    if s.empty or len(s) < p: return pd.Series([np.nan]*len(s), index=s.index)
-    wma = lambda x: np.sum(x*np.arange(1,len(x)+1))/np.sum(np.arange(1,len(x)+1))
-    wma1 = s.rolling(p//2).apply(wma, raw=True)
-    wma2 = s.rolling(p).apply(wma, raw=True)
-    diff = 2*wma1 - wma2
-    return diff.rolling(int(np.sqrt(p))).apply(wma, raw=True)
+    # plusDM = na(up) ? na : (up > down and up > 0 ? up : 0)
+    # minusDM = na(down) ? na : (down > up and down > 0 ? down : 0)
+    plus_dm = np.where((up > down) & (up > 0), up, 0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0)
 
-def rsi(src, p):
-    d = src.diff(); g = d.where(d > 0, 0.0); l = -d.where(d < 0, 0.0)
-    rs = rma(g, p) / rma(l, p).replace(0, 1e-9)
-    return 100 - 100 / (1 + rs)
+    # tr = ta.tr
+    # rmaTrueRange = ta.rma(tr, diLen)
+    true_range = ta.true_range(df_['high'], df_['low'], df_['close'])
+    rma_true_range = rma(true_range, di_len)
 
-def adx(h, l, c, p):
-    tr = pd.concat([h-l, abs(h-c.shift()), abs(l-c.shift())], axis=1).max(axis=1)
-    atr = rma(tr, p)
-    up = h.diff(); down = l.shift() - l
-    plus = np.where((up > down) & (up > 0), up, 0.0)
-    minus = np.where((down > up) & (down > 0), down, 0.0)
-    pdi = 100 * rma(pd.Series(plus, index=h.index), p) / atr.replace(0, 1e-9)
-    mdi = 100 * rma(pd.Series(minus, index=h.index), p) / atr.replace(0, 1e-9)
-    dx = 100 * abs(pdi - mdi) / (pdi + mdi).replace(0, 1e-9)
-    return rma(dx, p)
+    # rmaPlusDM = ta.rma(plusDM, diLen)
+    # rmaMinusDM = ta.rma(minusDM, diLen)
+    rma_plus_dm = rma(pd.Series(plus_dm, index=df_.index), di_len)
+    rma_minus_dm = rma(pd.Series(minus_dm, index=df_.index), di_len)
+    
+    # plusDI = rmaPlusDM / rmaTrueRange * 100
+    # minusDI = rmaMinusDM / rmaTrueRange * 100
+    # On gère la division par zéro
+    plus_di = 100 * (rma_plus_dm / rma_true_range)
+    minus_di = 100 * (rma_minus_dm / rma_true_range)
+    
+    # dx = math.abs(plusDI - minusDI) / (plusDI + minusDI == 0 ? 1 : plusDI + minusDI) * 100
+    # On gère la division par zéro
+    dx_denominator = plus_di + minus_di
+    dx = 100 * (np.abs(plus_di - minus_di) / dx_denominator.replace(0, 1))
 
-def heiken_ashi(df):
-    ha_close = (df[['Open', 'High', 'Low', 'Close']].sum(axis=1)) / 4
-    ha_open = pd.Series(index=ha_close.index, dtype=float)
-    ha_open.iloc[0] = (df['Open'].iloc[0] + df['Close'].iloc[0]) / 2
-    for i in range(1, len(ha_open)):
+    # adxValue = ta.rma(dx, adxLen)
+    adx_value = rma(dx, adx_len)
+    
+    return adx_value
+
+
+def calculate_heikin_ashi_simple(df: pd.DataFrame):
+    """
+    Calcule le signal Heikin Ashi simple comme dans le script Pine.
+    """
+    ha_close = (df['open'] + df['high'] + df['low'] + df['close']) / 4
+    
+    # Pine: var float haOpen = na, haOpen := na(haOpen[1]) ? ...
+    # C'est une initialisation spéciale, on la réplique avec une boucle.
+    ha_open = pd.Series(np.nan, index=df.index)
+    ha_open.iloc[0] = (df['open'].iloc[0] + df['close'].iloc[0]) / 2
+    for i in range(1, len(df)):
         ha_open.iloc[i] = (ha_open.iloc[i-1] + ha_close.iloc[i-1]) / 2
-    return ha_open, ha_close
+        
+    return ha_close, ha_open
 
-def smoothed_heiken_ashi(df, l1=10, l2=10):
-    eo, eh, el, ec = ema(df['Open'], l1), ema(df['High'], l1), ema(df['Low'], l1), ema(df['Close'], l1)
-    hao, hac = heiken_ashi(pd.DataFrame({'Open': eo, 'High': eh, 'Low': el, 'Close': ec}))
-    return ema(hao, l2), ema(hac, l2)
 
-def ichimoku_signal(h, l, c, tenkan=9, kijun=26, senkou_b=52):
-    if len(h) < senkou_b or len(l) < senkou_b or len(c) < senkou_b:
-        return 0
-    tenkan_sen = (h.rolling(tenkan).max() + l.rolling(tenkan).min()) / 2
-    kijun_sen = (h.rolling(kijun).max() + l.rolling(kijun).min()) / 2
-    senkou_a = (tenkan_sen + kijun_sen) / 2
-    senkou_b_val = (h.rolling(senkou_b).max() + l.rolling(senkou_b).min()) / 2
-    ccl = c.iloc[-1]
-    cssa = senkou_a.iloc[-1]
-    cssb = senkou_b_val.iloc[-1]
-    ctn = max(cssa, cssb)
-    cbn = min(cssa, cssb)
-    if ccl > ctn:
-        return 1
-    elif ccl < cbn:
-        return -1
-    return 0
+def calculate_smoothed_heikin_ashi(df: pd.DataFrame, len1: int = 10, len2: int = 10):
+    """
+    Calcule le signal Heikin Ashi lissé (+) comme dans le script Pine.
+    """
+    # Étape 1 : Lisser OHLC avec EMA
+    o1 = df['open'].ewm(span=len1, adjust=False).mean()
+    c1 = df['close'].ewm(span=len1, adjust=False).mean()
+    h1 = df['high'].ewm(span=len1, adjust=False).mean()
+    l1 = df['low'].ewm(span=len1, adjust=False).mean()
 
-# --- FETCH DATA ---
-@st.cache_data(ttl=900)
-def get_data(symbol):
-    try:
-        r = requests.get(TWELVE_DATA_API_URL, params={
-            "symbol": symbol,
-            "interval": INTERVAL,
-            "outputsize": OUTPUT_SIZE,
-            "apikey": API_KEY,
-            "timezone": "UTC"
-        })
-        j = r.json()
-        if "values" not in j:
-            return None
-        df = pd.DataFrame(j["values"])
-        df['datetime'] = pd.to_datetime(df['datetime'])
-        df.set_index('datetime', inplace=True)
-        df = df.sort_index()
-        df = df.astype(float)
-        df.rename(columns={"open":"Open","high":"High","low":"Low","close":"Close"}, inplace=True)
-        return df[['Open','High','Low','Close']]
-    except Exception:
-        return None
+    # Étape 2 : Calculer Heikin Ashi à partir des données lissées
+    haclose1 = (o1 + h1 + l1 + c1) / 4
+    
+    haopen1 = pd.Series(np.nan, index=df.index)
+    haopen1.iloc[0] = (o1.iloc[0] + c1.iloc[0]) / 2
+    for i in range(1, len(df)):
+        haopen1.iloc[i] = (haopen1.iloc[i-1] + haclose1.iloc[i-1]) / 2
+        
+    # Étape 3 : Lisser les bougies Heikin Ashi résultantes
+    o2 = haopen1.ewm(span=len2, adjust=False).mean()
+    c2 = haclose1.ewm(span=len2, adjust=False).mean()
 
-# --- STARS ---
-def confluence_stars(val):
-    if val == 6: return "⭐⭐⭐⭐⭐⭐"
-    elif val == 5: return "⭐⭐⭐⭐⭐"
-    elif val == 4: return "⭐⭐⭐⭐"
-    elif val == 3: return "⭐⭐⭐"
-    elif val == 2: return "⭐⭐"
-    elif val == 1: return "⭐"
-    else: return "WAIT"
+    return o2, c2
 
-# --- SIGNALS ---
-def calculate_signals(df):
-    if df is None or len(df) < 60:
-        return None
-    ohlc4 = df[['Open','High','Low','Close']].mean(axis=1)
-    signals = {}
-    bull = bear = 0
 
-    hma = hull_ma(df['Close'], 20)
-    if hma.iloc[-1] > hma.iloc[-2]: bull += 1; signals['HMA'] = "▲"
-    elif hma.iloc[-1] < hma.iloc[-2]: bear += 1; signals['HMA'] = "▼"
+def calculate_all_indicators(df: pd.DataFrame):
+    """
+    Fonction principale qui calcule tous les indicateurs et les signaux,
+    en miroir du script Pine "Canadian Confluence Premium (Précision ADX)".
+    """
+    params = {
+        "hmaLength": 20,
+        "adxThreshold": 20,
+        "rsiLength": 10,
+        "adxLength": 14,
+        "diLength": 14,
+        "ichimokuLength": 9,
+        "smoothedHaLen1": 10,
+        "smoothedHaLen2": 10,
+    }
 
-    rsi_val = rsi(ohlc4, 10).iloc[-1]
-    signals['RSI'] = f"{int(rsi_val)}"
-    if rsi_val > 50: bull += 1
-    elif rsi_val < 50: bear += 1
+    # --- CALCULS DES INDICATEURS ---
+    
+    # HMA
+    df['hma'] = ta.hma(df['close'], length=params['hmaLength'])
+    df['hmaSlope'] = np.where(df['hma'] > df['hma'].shift(1), 1, -1)
+    
+    # Heikin Ashi Simple
+    ha_close, ha_open = calculate_heikin_ashi_simple(df)
+    df['haSignal'] = np.where(ha_close > ha_open, 1, -1)
 
-    adx_val = adx(df['High'], df['Low'], df['Close'], 14).iloc[-1]
-    signals['ADX'] = f"{int(adx_val)}"
-    if adx_val >= 20: bull += 1; bear += 1
+    # Smoothed Heikin Ashi
+    o2, c2 = calculate_smoothed_heikin_ashi(df, params['smoothedHaLen1'], params['smoothedHaLen2'])
+    df['smoothedHaSignal'] = np.where(o2 > c2, -1, 1)
 
-    hao, hac = heiken_ashi(df)
-    if hac.iloc[-1] > hao.iloc[-1]: bull += 1; signals['HA'] = "▲"
-    elif hac.iloc[-1] < hao.iloc[-1]: bear += 1; signals['HA'] = "▼"
+    # RSI (sur hlc4)
+    hlc4 = (df['open'] + df['high'] + df['low'] + df['close']) / 4
+    df['rsi'] = ta.rsi(hlc4, length=params['rsiLength'])
+    df['rsiSignal'] = np.where(df['rsi'] > 50, 1, -1)
 
-    shao, shac = smoothed_heiken_ashi(df)
-    if shac.iloc[-1] > shao.iloc[-1]: bull += 1; signals['SHA'] = "▲"
-    elif shac.iloc[-1] < shao.iloc[-1]: bear += 1; signals['SHA'] = "▼"
+    # ADX (avec la fonction de calcul précis)
+    df['adx'] = calculate_adx(df, di_len=params['diLength'], adx_len=params['adxLength'])
+    df['adxHasMomentum'] = df['adx'] >= params['adxThreshold']
 
-    ichi_sig = ichimoku_signal(df['High'], df['Low'], df['Close'])
-    if ichi_sig == 1: bull += 1; signals['Ichimoku'] = "▲"
-    elif ichi_sig == -1: bear += 1; signals['Ichimoku'] = "▼"
-    else: signals['Ichimoku'] = "—"
+    # Ichimoku
+    # Note : pandas_ta a des longueurs par défaut différentes, il faut les spécifier.
+    ichimoku_df = ta.ichimoku(df['high'], df['low'], df['close'], 
+                              tenkan=params['ichimokuLength'], kijun=26, senkou=52)
+    # Renommer les colonnes pour plus de clarté
+    df['tenkan'] = ichimoku_df[f'ITS_{params["ichimokuLength"]}']
+    df['kijun'] = ichimoku_df['IKS_26']
+    df['senkouA'] = ichimoku_df['ISA_9'] # Note: pandas_ta utilise les noms originaux
+    df['senkouB'] = ichimoku_df['ISB_26'] # Le nom est trompeur, mais c'est bien la Senkou B à 52 périodes
+    
+    cloud_top = df[['senkouA', 'senkouB']].max(axis=1)
+    cloud_bottom = df[['senkouA', 'senkouB']].min(axis=1)
+    df['ichimokuSignal'] = np.select(
+        [df['close'] > cloud_top, df['close'] < cloud_bottom],
+        [1, -1],
+        default=0
+    )
 
-    confluence = max(bull, bear)
-    direction = "HAUSSIER" if bull > bear else "BAISSIER" if bear > bull else "NEUTRE"
-    stars = confluence_stars(confluence)
+    # --- CALCUL DES CONFLUENCES ---
+    
+    bull_conditions = [
+        df['hmaSlope'] == 1,
+        df['haSignal'] == 1,
+        df['smoothedHaSignal'] == 1,
+        df['rsiSignal'] == 1,
+        df['adxHasMomentum'], # C'est déjà un booléen (True/False)
+        df['ichimokuSignal'] == 1
+    ]
+    df['bullConfluences'] = np.sum(bull_conditions, axis=0)
 
-    return {"confluence": confluence, "direction": direction, "stars": stars, "signals": signals}
+    bear_conditions = [
+        df['hmaSlope'] == -1,
+        df['haSignal'] == -1,
+        df['smoothedHaSignal'] == -1,
+        df['rsiSignal'] == -1,
+        df['adxHasMomentum'],
+        df['ichimokuSignal'] == -1
+    ]
+    df['bearConfluences'] = np.sum(bear_conditions, axis=0)
+    
+    df['confluence'] = df[['bullConfluences', 'bearConfluences']].max(axis=1)
 
-# --- UI ---
-st.sidebar.header("Paramètres")
-min_conf = st.sidebar.slider("Confluence minimale", 0, 6, 3)
-show_all = st.sidebar.checkbox("Afficher toutes les paires", value=False)
-if st.sidebar.button("Lancer le scan"):
-    results = []
-    for i, symbol in enumerate(FOREX_PAIRS_TD):
-        st.sidebar.write(f"{symbol} ({i+1}/{len(FOREX_PAIRS_TD)})")
-        df = get_data(symbol)
-        time.sleep(1.0)
-        res = calculate_signals(df)
-        if res:
-            if show_all or res['confluence'] >= min_conf:
-                color = 'green' if res['direction'] == 'HAUSSIER' else 'red' if res['direction'] == 'BAISSIER' else 'gray'
-                row = {
-                    "Paire": symbol.replace("/", ""),
-                    "Confluences": res['stars'],
-                    "Direction": f"<span style='color:{color}'>{res['direction']}</span>",
-                }
-                row.update(res['signals'])
-                results.append(row)
+    return df
 
-    if results:
-        df_res = pd.DataFrame(results).sort_values(by="Confluences", ascending=False)
-        st.markdown(
-            df_res.to_html(escape=False, index=False), unsafe_allow_html=True
-        )
-        st.download_button("📂 Exporter CSV", data=df_res.to_csv(index=False).encode('utf-8'), file_name="confluences.csv", mime="text/csv")
-    else:
-        st.warning("Aucun résultat correspondant aux critères.")
 
-st.caption(f"Dernière mise à jour : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
+# =============================================================================
+# EXEMPLE D'UTILISATION
+# =============================================================================
+if __name__ == '__main__':
+    # Simuler un DataFrame de données OHLCV
+    data = {
+        'open': [100, 102, 101, 103, 105, 104, 106, 107, 105, 108, 110, 109, 108, 107, 106, 105, 104, 103, 105, 106],
+        'high': [103, 104, 103, 105, 106, 106, 108, 109, 108, 110, 112, 110, 109, 108, 107, 106, 105, 105, 107, 108],
+        'low': [99, 101, 100, 102, 104, 103, 105, 106, 104, 107, 109, 108, 107, 106, 105, 104, 103, 102, 104, 105],
+        'close': [102, 103, 102, 104, 105, 105, 107, 108, 106, 109, 111, 109, 108, 107, 106, 105, 104, 104, 106, 107],
+        'volume': [1000]*20
+    }
+    # Pour un test réel, il faudrait au moins 100 bougies pour que les indicateurs se stabilisent
+    # df_ohlc = pd.read_csv("vos_donnees.csv") 
+    df_ohlc = pd.DataFrame(data)
+
+    # Calculer tous les indicateurs
+    df_final = calculate_all_indicators(df_ohlc)
+
+    # Afficher les dernières lignes avec les résultats
+    # On affiche les colonnes clés pour la vérification
+    print(df_final[[
+        'close', 'adx', 'adxHasMomentum', 'rsi', 'rsiSignal', 
+        'hmaSlope', 'haSignal', 'smoothedHaSignal', 'ichimokuSignal',
+        'bullConfluences', 'bearConfluences', 'confluence'
+    ]].tail(10))
