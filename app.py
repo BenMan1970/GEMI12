@@ -7,10 +7,9 @@ import requests
 
 # --- CONFIGURATION (LISANT LES SECRETS ET PARAMÈTRES) ---
 try:
-    # MODIFICATION : On lit directement la variable depuis les secrets.
+    # Lecture sécurisée de la clé API depuis les secrets de Streamlit
     API_KEY = st.secrets["TWELVEDATA_API_KEY"]
 except (KeyError, FileNotFoundError):
-    # Le message d'erreur est maintenant plus précis.
     st.error("Secret 'TWELVEDATA_API_KEY' non trouvé. Veuillez le configurer dans les paramètres de votre application.")
     st.stop()
 
@@ -19,7 +18,7 @@ INTERVAL = "1h"
 OUTPUT_SIZE = 100 
 
 # --- FETCH DATA ---
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=900) # Cache les données pendant 15 minutes
 def get_data(symbol):
     """Récupère les données d'une paire depuis l'API Twelve Data."""
     try:
@@ -137,11 +136,11 @@ def calculate_signals(df):
     return {"confluence": confluence, "direction": direction, "stars": stars, "signals": signals}
 
 # --- INTERFACE UTILISATEUR ---
-st.set_page_config(layout="wide")
+st.set_page_config(layout="wide", page_title="Scanner de Confluence Forex")
 st.title("Scanner de Confluence Forex")
 
 st.sidebar.header("Paramètres")
-min_conf = st.sidebar.slider("Confluence minimale", 0, 6, 3)
+min_conf = st.sidebar.slider("Confluence minimale", 0, 6, 3, help="Filtrez les paires qui ont au moins ce nombre de signaux concordants.")
 show_all = st.sidebar.checkbox("Afficher toutes les paires", value=False)
 
 if st.sidebar.button("Lancer le scan"):
@@ -155,17 +154,17 @@ if st.sidebar.button("Lancer le scan"):
         
         df = get_data(symbol)
         
+        # Pause obligatoire pour respecter la limite de 8 appels/minute de l'API gratuite
         time.sleep(8) 
         
         if df is not None:
             res = calculate_signals(df)
             if res:
                 if show_all or res['confluence'] >= min_conf:
-                    color = 'green' if res['direction'] == 'HAUSSIER' else 'red' if res['direction'] == 'BAISSIER' else '#888888'
                     row = {
                         "Paire": symbol,
                         "Confluences": res['stars'],
-                        "Direction": f"<span style='color:{color}; font-weight:bold;'>{res['direction']}</span>",
+                        "Direction": res['direction'], # Texte brut pour le styling
                         "confluence_score": res['confluence']
                     }
                     row.update(res['signals'])
@@ -175,9 +174,27 @@ if st.sidebar.button("Lancer le scan"):
 
     if results:
         df_res = pd.DataFrame(results).sort_values(by="confluence_score", ascending=False)
-        df_display = df_res.drop(columns=['confluence_score']) 
+        df_display = df_res.drop(columns=['confluence_score'])
         
-        st.markdown(df_display.to_html(escape=False, index=False), unsafe_allow_html=True)
+        # --- AMÉLIORATION DE L'AFFICHAGE ---
+        def style_direction(direction):
+            if direction == 'HAUSSIER':
+                return 'color: #2ECC71' # Vert
+            elif direction == 'BAISSIER':
+                return 'color: #E74C3C' # Rouge
+            return 'color: #888888' # Gris pour NEUTRE
+
+        df_display.rename(columns={
+            "SMA(9)": "SMA",
+            "RSI(10)": "RSI",
+            "ADX(14)": "ADX",
+        }, inplace=True)
+        
+        st.dataframe(
+            df_display.style.applymap(style_direction, subset=['Direction']),
+            use_container_width=True
+        )
+        # --- FIN DE L'AMÉLIORATION ---
         
         csv = df_res.to_csv(index=False).encode('utf-8')
         st.download_button(
