@@ -7,19 +7,19 @@ import requests
 
 # --- CONFIGURATION (LISANT LES SECRETS ET PARAMÈTRES) ---
 try:
-    # Lecture sécurisée de la clé API depuis les secrets de Streamlit
-    API_KEY = st.secrets["twelvedata"]["api_key"]
+    # MODIFICATION : On lit directement la variable depuis les secrets.
+    API_KEY = st.secrets["TWELVEDATA_API_KEY"]
 except (KeyError, FileNotFoundError):
-    st.error("Clé API non trouvée. Assurez-vous d'avoir configuré votre fichier secrets.toml.")
+    # Le message d'erreur est maintenant plus précis.
+    st.error("Secret 'TWELVEDATA_API_KEY' non trouvé. Veuillez le configurer dans les paramètres de votre application.")
     st.stop()
 
 TWELVE_DATA_API_URL = "https://api.twelvedata.com/time_series"
-# L'intervalle de temps est maintenant réglé sur 1 heure (H1)
 INTERVAL = "1h" 
 OUTPUT_SIZE = 100 
 
 # --- FETCH DATA ---
-@st.cache_data(ttl=900) # Cache les données pendant 15 minutes
+@st.cache_data(ttl=900)
 def get_data(symbol):
     """Récupère les données d'une paire depuis l'API Twelve Data."""
     try:
@@ -34,7 +34,6 @@ def get_data(symbol):
         r.raise_for_status()
         j = r.json()
         if j.get("status") == "error":
-            # Affiche l'erreur API directement dans l'interface pour le débogage
             st.error(f"Erreur API pour {symbol}: {j.get('message', 'Format de réponse inconnu.')}")
             return None
         df = pd.DataFrame(j["values"])
@@ -52,7 +51,6 @@ def get_data(symbol):
         return None
 
 # --- PAIRS ---
-# Liste de paires Forex standard
 FOREX_PAIRS_TD = [
     "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD",
     "EUR/JPY", "GBP/JPY", "EUR/GBP", "XAU/USD"
@@ -125,7 +123,6 @@ def calculate_signals(df):
     senkou_b = ((df['High'].rolling(52).max() + df['Low'].rolling(52).min()) / 2).shift(26)
     price = df['Close'].iloc[-1]
     
-    # On compare le prix actuel au nuage actuel (projeté depuis 26 périodes)
     if price > senkou_a.iloc[-1] and price > senkou_b.iloc[-1]:
         bull += 1; signals['Ichimoku'] = "▲"
     elif price < senkou_a.iloc[-1] and price < senkou_b.iloc[-1]:
@@ -158,8 +155,6 @@ if st.sidebar.button("Lancer le scan"):
         
         df = get_data(symbol)
         
-        # Le plan gratuit de Twelve Data a une limite de 8 requêtes/minute.
-        # Une pause de ~8 secondes est nécessaire pour ne pas dépasser cette limite.
         time.sleep(8) 
         
         if df is not None:
@@ -171,7 +166,7 @@ if st.sidebar.button("Lancer le scan"):
                         "Paire": symbol,
                         "Confluences": res['stars'],
                         "Direction": f"<span style='color:{color}; font-weight:bold;'>{res['direction']}</span>",
-                        "confluence_score": res['confluence'] # Ajout d'une colonne pour le tri
+                        "confluence_score": res['confluence']
                     }
                     row.update(res['signals'])
                     results.append(row)
